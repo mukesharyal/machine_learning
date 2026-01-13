@@ -2,40 +2,86 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-#Let's define the activation functions
-def sigmoid(x):
-    return 1 / (1 + np.exp(-x))
+# We need to define the activation function, but we will also need the derivatives of them, se we will 
+# have to define a class for the activation function itself
+class ActivationFunction:
 
-def relu(x):
-    return np.maximum(0, x)
+    def __init__(self, signature, derivative_signature):
+        self.signature = signature
+        self.derivative_signature = derivative_signature
 
-# Let's define the neuron
-class Neuron:
 
-    # For a neuron, we need the number of inputs it receives and the bias
-    def __init__(self, num_inputs, activation_function):
-        self.weights = np.random.rand(num_inputs)
-        self.bias = np.random.rand()
-        self.activation_function = activation_function
 
-    def __repr__(self):
-        clean_weights = np.round(self.weights, 4)
-        return f"Neuron(weight={clean_weights}, bias={self.bias:.4f})"
+#Let's also define the loss function class for the loss functions used
+class LossFunction:
 
-    def output(self, input):
-        return self.activation_function(np.dot(self.weights, input) + self.bias)
-    
+    def __init__(self, signature, derivative_signature):
+        self.signature = signature
+        self.derivative_signature = derivative_signature
+
+
+
+# Let's define the activation functions
+sigmoid = ActivationFunction(
+    signature = lambda x: 1 / (1 + np.exp(-x)),
+    derivative_signature=lambda x: (1 / (1 + np.exp(-x))) * (1 - (1 / (1 + np.exp(-x))))
+)
+
+relu = ActivationFunction(
+    signature = lambda x: np.maximum(0, x),
+    derivative_signature = lambda x: (x > 0).astype(float)
+)
+
+
+
+# Let's also define the loss functions
+# We add 1e-15 (epsilon) to prevent log(0) which would result in NaN errors
+bce_loss = LossFunction(
+    signature=lambda target, output: -np.mean(
+        target * np.log(output + 1e-15) + (1 - target) * np.log(1 - output + 1e-15)
+    ),
+    derivative_signature=lambda target, output: (
+        (output - target) / (output * (1 - output) + 1e-15)
+    )
+)
 
 
 # Let's define a layer of neurons
 class Layer:
 
-    # For a layer, we need the number of neurons and the number of inputs from the previous layer and the activation function
+    # In the new scheme to allow for vectorization, we will have the layer as the smallest unit of the network
     def __init__(self, num_neurons, num_inputs, activation_function):
-        self.neurons = [Neuron(num_inputs, activation_function) for _ in range(num_neurons)]
+
+        # Now, we will have an array with num_neurons number of neurons, but instead of neurons we will directly have
+        # the weights and biases in a matrix
+        # Instead of using a for loop, we can use numpy to initialise all the random values at once
+        # This function will generate a matrix of dimensions [num_neurons] X [num_inputs]
+        # We are using the randn for the values to be taken from a normal distribution with mean 0 and sigma 1
+        # Also, we are normalizing the values so that they are not very large
+        self.W = np.random.randn(num_neurons, num_inputs) * np.sqrt(1.0 / num_inputs)
+        self.B = np.zeros((num_neurons, 1))
+        self.activation_function = activation_function
+
 
     def __repr__(self):
-        return f"Layer = {self.neurons}\n"
+        return f"Layer W = {self.W.shape}, Layer B = {self.B.shape}\n"
+    
+
+    def output(self, input):
+
+        # Let's store the input to the layer as we might need it
+        self.inputA = input
+
+        # Let's also store the thereby formed z
+        self.Z = np.dot(self.W, input) + self.B
+
+        # Let's also store the output value produced by the layer as well
+        self.A = self.activation_function.signature(self.Z)
+
+        return self.A
+
+
+    
 
 
 
@@ -46,10 +92,21 @@ class Layer:
 # This means the network has 10 input neurons, then 2 hidden layers with 4 neurons in each layer, and 4 output neurons
 class NeuralNetwork:
 
-    def __init__(self, input_neurons, hidden_layers, hidden_activation_function, output_neurons, output_activation_function):
+    def __init__(
+            self, 
+            input_neurons, 
+            hidden_layers, 
+            hidden_activation_function, 
+            output_neurons, 
+            output_activation_function,
+            loss_function
+            ):
 
         # Our neural network is essentially an array of the various layers
         self.network = []
+
+        # We just assign the loss function to the network as well
+        self.loss_function = loss_function
 
         # Let's not have the input layer as one layer because it doesn't need weights and biases
         # Then, the layers used are the hidden layers
@@ -71,23 +128,75 @@ class NeuralNetwork:
         return f"Network = [{self.network}]"
     
 
-    def forward_pass(self, input):
+    def forward_pass(self, input, target):
 
-        # Pass the input through each layer of the network, calculate the output and feed that to the next layer
-        for layer in self.network:
-            new_input = [neuron.output(input) for neuron in layer.neurons]
-            input = new_input
+        for i in range(len(self.network)):
 
-        return input
+            output = self.network[i].output(input)
+
+            input = output
+
+        # Here we have the output for the layer after the whole forward pass
+        loss = self.loss_function.signature(target, output)
+
+        # Let's also store the value of the final del, so we can just loop backwards in the backpropagation step
+        final_layer = self.network[len(self.network) - 1]
+
+        self.delta = (
+            self.loss_function.derivative_signature(target, final_layer.A) *
+            final_layer.activation_function.derivative_signature(final_layer.Z)
+        )
+
+    
+    def backpropagate(self, learning_rate):
+
+        for i in reversed(range(len(self.network))):
+
+            # In forward pass, we have the delta for the final layer, so we just change it till we reach the input
+            current_delta = self.delta
+
+            layer = self.network[i]
+
+            # For every layer (coming from the back), we find the gradients for that layer as
+            gradW = np.dot(current_delta, layer.inputA.T)
+            gradB = current_delta
+
+            # While we haven't reached the input layer, we need to change the current delta
+            if i > 0:
+
+                previous_layer = self.network[i-1]
+
+                self.delta = np.dot(layer.W.T, current_delta) * previous_layer.activation_function.derivative_signature(previous_layer.Z)
+
+            layer.W -= learning_rate * gradW
+            layer.B -= learning_rate * gradB
+
+            print(f"W is {layer.W}, B is {layer.B}")
 
 
 
 
+# Let's also import the data for testing
+import os
 
-nn = NeuralNetwork(4, [4, 4], relu, 4, sigmoid)
-output = nn.forward_pass([2.0, 3.0, -4.0, 5.0])
+# Get the path of the CSV file
+script_dir = os.path.dirname(__file__) 
+file_path = os.path.join(script_dir, 'simpler_data.csv')
 
-print(output)
+# Fetch the CSV file using Pandas
+data = pd.read_csv(file_path)
+
+# Get the first row of the data
+first_row_input = data.iloc[0, :2].to_numpy()
+first_row_target = data.iloc[0]['y']
+
+column_matrix = first_row_input[:, None]
+
+nn = NeuralNetwork(2, [4, 3], relu, 1, sigmoid, bce_loss)
+
+nn.forward_pass(column_matrix, first_row_target)
+
+nn.backpropagate(0.001)
 
 
         
