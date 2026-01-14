@@ -22,26 +22,56 @@ class LossFunction:
 
 
 # Let's define the activation functions
+# The Sigmoid function
 sigmoid = ActivationFunction(
     signature = lambda x: 1 / (1 + np.exp(-x)),
     derivative_signature=lambda x: (1 / (1 + np.exp(-x))) * (1 - (1 / (1 + np.exp(-x))))
 )
 
+# The ReLU function
 relu = ActivationFunction(
     signature = lambda x: np.maximum(0, x),
     derivative_signature = lambda x: (x > 0).astype(float)
 )
 
+# The SoftMax function
+softmax = ActivationFunction(
+    signature=lambda x: (
+        np.exp(x - np.max(x)) / np.sum(np.exp(x - np.max(x)), axis=0)
+    ),
+    
+    # We won't actually use the derivative for the loss as we will pair it with the CE Loss function for an 
+    # elegant expression for the loss
+    derivative_signature=lambda x: (
+        (np.exp(x - np.max(x)) / np.sum(np.exp(x - np.max(x)), axis=0)) * (1 - (np.exp(x - np.max(x)) / np.sum(np.exp(x - np.max(x)), axis=0)))
+    )
+)
+
+
+
 
 
 # Let's also define the loss functions
-# We add 1e-15 (epsilon) to prevent log(0) which would result in NaN errors
+# Binary Cross Entropy Loss function
 bce_loss = LossFunction(
     signature=lambda target, output: -np.mean(
         target * np.log(output + 1e-15) + (1 - target) * np.log(1 - output + 1e-15)
     ),
+
+    # We can also pair this with the sigmoid function to have another elegant loss function
     derivative_signature=lambda target, output: (
         (output - target) / (output * (1 - output) + 1e-15)
+    )
+)
+
+
+# Categorical Cross-Entropy Loss Function
+cce_loss = LossFunction(
+    signature=lambda target, output: -np.sum(
+        target * np.log(output + 1e-15)
+    ),
+    derivative_signature=lambda target, output: (
+        -(target / (output + 1e-15))
     )
 )
 
@@ -126,9 +156,10 @@ class NeuralNetwork:
     
     def __repr__(self):
         return f"Network = [{self.network}]"
-    
 
-    def forward_pass(self, input, target):
+
+    # Let's define the function that actually feeds the input forward to the network to produce the output
+    def feed_forward(self, input):
 
         for i in range(len(self.network)):
 
@@ -136,19 +167,31 @@ class NeuralNetwork:
 
             input = output
 
-        # Here we have the output for the layer after the whole forward pass
-        loss = self.loss_function.signature(target, output)
+        return output
 
-        # Let's also store the value of the final del, so we can just loop backwards in the backpropagation step
-        final_layer = self.network[len(self.network) - 1]
 
-        self.delta = (
-            self.loss_function.derivative_signature(target, final_layer.A) *
-            final_layer.activation_function.derivative_signature(final_layer.Z)
-        )
+    def _forward_pass(self, input, target):
+
+        output = self.feed_forward(input)
+
+        self.loss = self.loss_function.signature(target, output)
+
+        # CHECK: If using Softmax + CCE, the derivative is just (Output - Target)
+        # This is numerically stable and avoids the 'increasing loss' issue.
+        if self.network[-1].activation_function == softmax and self.loss_function == cce_loss:
+            self.delta = output - target
+        else:
+            # Standard chain rule for other combinations (like Sigmoid/BCE)
+            final_layer = self.network[-1]
+            self.delta = (
+                self.loss_function.derivative_signature(target, final_layer.A) *
+                final_layer.activation_function.derivative_signature(final_layer.Z)
+            )
+
+        return output
 
     
-    def backpropagate(self, learning_rate):
+    def _backpropagate(self, learning_rate):
 
         for i in reversed(range(len(self.network))):
 
@@ -166,37 +209,115 @@ class NeuralNetwork:
 
                 previous_layer = self.network[i-1]
 
+                # Propagate the error to the next layer
                 self.delta = np.dot(layer.W.T, current_delta) * previous_layer.activation_function.derivative_signature(previous_layer.Z)
-
+            
             layer.W -= learning_rate * gradW
             layer.B -= learning_rate * gradB
 
-            print(f"W is {layer.W}, B is {layer.B}")
+
+    # The forward_pass and the backward_pass are the internal functions for training
+    # Now, we actually define the train function exposed via the API
+    def train(self, input, target, learning_rate):
+
+        # First, perform forward pass
+        self._forward_pass(input, target)
+
+        # Now, perform backward pass with the learning rate
+        self._backpropagate(learning_rate)
+
+        # Now, we return the loss produced by the forward pass
+        return self.loss
 
 
-
-
-# Let's also import the data for testing
 import os
 
-# Get the path of the CSV file
-script_dir = os.path.dirname(__file__) 
-file_path = os.path.join(script_dir, 'simpler_data.csv')
 
-# Fetch the CSV file using Pandas
-data = pd.read_csv(file_path)
+# Import the MnistDataLoader to actually load the MNIST data to train our model
+from mnist_helper import MnistDataloader
+# 1. Get the directory where your script is located
+script_dir = os.path.dirname(__file__)
 
-# Get the first row of the data
-first_row_input = data.iloc[0, :2].to_numpy()
-first_row_target = data.iloc[0]['y']
+# 2. Define the path to the 'mnist' folder relative to this script
+input_path = os.path.join(script_dir, 'mnist')
+training_images_filepath = f'{input_path}/train-images-idx3-ubyte/train-images-idx3-ubyte'
+training_labels_filepath = f'{input_path}/train-labels-idx1-ubyte/train-labels-idx1-ubyte'
+test_images_filepath = f'{input_path}/t10k-images-idx3-ubyte/t10k-images-idx3-ubyte'
+test_labels_filepath = f'{input_path}/t10k-labels-idx1-ubyte/t10k-labels-idx1-ubyte'
 
-column_matrix = first_row_input[:, None]
+dataloader = MnistDataloader(training_images_filepath, training_labels_filepath, test_images_filepath, test_labels_filepath)
+(x_train_list, y_train_list), (x_test_list, y_test_list) = dataloader.load_data()
 
-nn = NeuralNetwork(2, [4, 3], relu, 1, sigmoid, bce_loss)
+# Helper function to One-Hot Encode
+def one_hot(labels, classes=10):
+    labels = np.array(labels)
+    one_hot_matrix = np.zeros((classes, labels.size))
+    one_hot_matrix[labels, np.arange(labels.size)] = 1
+    return one_hot_matrix
 
-nn.forward_pass(column_matrix, first_row_target)
+# Process Inputs: Convert to NumPy, Flatten to 784, Transpose to (784, N), and Normalize
+train_inputs = np.array(x_train_list).reshape(len(x_train_list), -1).T / 255.0
+test_inputs = np.array(x_test_list).reshape(len(x_test_list), -1).T / 255.0
 
-nn.backpropagate(0.001)
+# Process Outputs: One-Hot Encode and ensure shape is (10, N)
+train_outputs = one_hot(y_train_list)
+test_outputs = one_hot(y_test_list)
+
+
+
+
+# Let's define our neural network
+nn = NeuralNetwork(784, [128, 64, 16], relu, 10, softmax, cce_loss)
+
+# Let's create an empty array that holds the loss as the training progresses
+loss_history = []
+
+for epoch in range(100):
+    
+    # Let's store the loss of each epoch
+    epoch_loss = 0.0
+
+    for i in range(train_inputs.shape[1]):
+        # Get the i-th sample as a column vector (2, 1)
+        x = train_inputs[:, i:i+1]
+        # Get the i-th label as a column vector (1, 1)
+        y = train_outputs[:, i:i+1]
+
+        # Now, the train function returns the loss of the netork for the iteration
+        loss = nn.train(x, y, 0.01)
+
+        # Add the loss to the epoch loss
+        epoch_loss += loss
+
+    # After each epoch, calculate the average loss of the epoch
+    average_loss = epoch_loss / train_inputs.shape[1]
+    loss_history.append(average_loss)
+
+    # Also test the accuracy of the network, say after each 20 epochs
+    if(epoch % 20 == 0):
+        # Forward pass the whole subset
+        predictions = nn.feed_forward(train_inputs) 
+        
+        # Get index of highest probability for each column
+        y_pred_labels = np.argmax(predictions, axis=0)
+        y_true_labels = np.argmax(train_outputs, axis=0)
+        
+        accuracy = np.mean(y_pred_labels == y_true_labels) * 100
+        print(f"Epoch {epoch} | Loss: {average_loss:.4f} | Accuracy: {accuracy:.2f}%")
+
+# Plot the results after training is finished
+plt.plot(loss_history)
+plt.title('Training Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.grid(True)
+plt.show()
+
+    
+
+
+
+
 
 
         

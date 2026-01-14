@@ -1,2 +1,4 @@
 .venv
 .vscode
+neural_network/__pycache__
+neural_network/mnist
